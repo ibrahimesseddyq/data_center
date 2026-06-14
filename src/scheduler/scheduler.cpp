@@ -4,31 +4,30 @@
 
 namespace datacenter {
 
-void Scheduler::add_node(GPUNode node) {
+Scheduler::~Scheduler() {
+    stop_all();
+}
+
+void Scheduler::add_node(std::string node_id, int gpu_capacity) {
+    auto node = std::make_unique<GPUNode>(std::move(node_id), gpu_capacity);
+    node->start();
     nodes_.push_back(std::move(node));
 }
 
 void Scheduler::submit(const Job& job) {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
     queue_.push(job);
 }
 
-std::vector<std::uint64_t> Scheduler::advance(std::chrono::seconds elapsed) {
-    std::vector<std::uint64_t> completed;
-    for (GPUNode& node : nodes_) {
-        std::vector<std::uint64_t> done = node.advance(elapsed);
-        completed.insert(completed.end(), done.begin(), done.end());
-    }
-    return completed;
-}
-
 bool Scheduler::schedule_next() {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
     if (queue_.empty()) {
         return false;
     }
 
     const Job& job = queue_.front();
-    for (GPUNode& node : nodes_) {
-        if (node.assign(job)) {  // assign() is a no-op if the job does not fit
+    for (auto& node : nodes_) {
+        if (node->try_assign(job)) {  // thread-safe; no-op if it does not fit
             queue_.pop();
             return true;
         }
@@ -44,6 +43,26 @@ std::size_t Scheduler::schedule_all() {
         ++placed;
     }
     return placed;
+}
+
+std::size_t Scheduler::pending_jobs() const {
+    std::lock_guard<std::mutex> lock(queue_mutex_);
+    return queue_.size();
+}
+
+std::vector<GPUNode::Snapshot> Scheduler::snapshot() const {
+    std::vector<GPUNode::Snapshot> out;
+    out.reserve(nodes_.size());
+    for (const auto& node : nodes_) {
+        out.push_back(node->snapshot());
+    }
+    return out;
+}
+
+void Scheduler::stop_all() {
+    for (auto& node : nodes_) {
+        node->stop();
+    }
 }
 
 }  // namespace datacenter

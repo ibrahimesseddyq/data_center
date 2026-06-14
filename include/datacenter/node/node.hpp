@@ -1,15 +1,23 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "datacenter/job/job.hpp"
 
 namespace datacenter {
 
-// A compute node exposing a fixed number of GPUs that runs jobs.
+// A compute node with a fixed number of GPUs. Each node runs its own worker
+// thread that advances its jobs and frees GPUs as they complete.
+//
+// Thread-safety: try_assign() and snapshot() may be called from any thread; the
+// worker thread mutates state under the same lock. The object owns a thread and
+// a mutex, so it is neither copyable nor movable.
 class GPUNode {
 public:
     // A job currently executing on the node, with the time left until it ends.
@@ -18,34 +26,46 @@ public:
         std::chrono::seconds remaining;
     };
 
-    GPUNode(std::string node_id, int gpu_capacity);
+    // A consistent point-in-time view of the node, safe to read off-thread.
+    struct Snapshot {
+        std::string node_id;
+        int gpu_capacity;
+        int current_load;
+        std::vector<RunningJob> running_jobs;
+    };
 
-    // --- accessors ---
+    GPUNode(std::string node_id, int gpu_capacity);
+    ~GPUNode();
+
+    GPUNode(const GPUNode&) = delete;
+    GPUNode& operator=(const GPUNode&) = delete;
+
+    // Launches / stops the worker thread. stop() joins and is idempotent.
+    void start();
+    void stop();
+
+    // Immutable after construction — no lock required.
     const std::string& node_id() const { return node_id_; }
     int gpu_capacity() const { return gpu_capacity_; }
-    int current_load() const { return current_load_; }  // GPUs in use
-    int available_gpus() const { return gpu_capacity_ - current_load_; }
-    const std::vector<RunningJob>& running_jobs() const { return running_jobs_; }
 
-    // True if the node has enough free GPUs to run `job`.
-    bool can_assign(const Job& job) const;
+    // Thread-safe. Places `job` if it fits; returns false otherwise.
+    bool try_assign(const Job& job);
 
-    // Places `job` on the node, marking it Running. Returns false (no-op) if it
-    // does not fit. The job runs for its `duration`.
-    bool assign(const Job& job);
-
-    // Advances time by `elapsed`, completing any jobs whose remaining time runs
-    // out and freeing their GPUs. Returns the ids of the jobs that finished.
-    std::vector<std::uint64_t> advance(std::chrono::seconds elapsed);
-
-    // Removes a running job by id and frees its GPUs. Returns true if found.
-    bool complete(std::uint64_t job_id);
+    // Thread-safe consistent view for reporting.
+    Snapshot snapshot() const;
 
 private:
-    std::string node_id_;
-    int gpu_capacity_;
-    int current_load_ = 0;
+    void run();  // worker loop: advances jobs once per second
+
+    const std::string node_id_;
+    const int gpu_capacity_;
+
+    mutable std::mutex mutex_;            // guards the two fields below
+    int current_load_ = 0;               // GPUs in use
     std::vector<RunningJob> running_jobs_;
+
+    std::thread thread_;
+    std::atomic<bool> running_{false};
 };
 
 }  // namespace datacenter

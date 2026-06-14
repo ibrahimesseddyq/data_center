@@ -2,7 +2,8 @@
 # For the full/configurable build, use CMake instead (see README).
 
 CXX      ?= g++
-CXXFLAGS ?= -std=c++20 -Wall -Wextra -Wpedantic -O2
+CXXFLAGS ?= -std=c++20 -Wall -Wextra -Wpedantic -O2 -pthread
+LDFLAGS  ?= -pthread
 INCLUDES := -Iinclude
 
 BUILD_DIR := build
@@ -20,7 +21,7 @@ OBJS := $(SRCS:%.cpp=$(BUILD_DIR)/%.o)
 all: $(BIN)
 
 $(BIN): $(OBJS)
-	$(CXX) $(CXXFLAGS) $(OBJS) -o $@
+	$(CXX) $(CXXFLAGS) $(OBJS) -o $@ $(LDFLAGS)
 
 # Compile each .cpp into build/, mirroring the source tree.
 $(BUILD_DIR)/%.o: %.cpp

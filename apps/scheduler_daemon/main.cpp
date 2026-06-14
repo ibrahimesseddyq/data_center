@@ -1,11 +1,13 @@
-// Demo driver: submits a batch of jobs over time, runs the scheduler once per
-// second, and prints cluster state after each tick.
+// Demo driver: submits a batch of jobs over time and runs the scheduler once
+// per second. Each GPU node runs on its own thread and completes its jobs
+// asynchronously, freeing GPUs as it goes.
 #include <chrono>
 #include <cstdint>
-#include <iostream>
+#include <string>
 #include <thread>
 #include <vector>
 
+#include "datacenter/common/sync_print.hpp"
 #include "datacenter/scheduler/scheduler.hpp"
 
 using namespace datacenter;
@@ -19,36 +21,38 @@ struct PendingSubmission {
     Job job;
 };
 
-int running_job_count(const Scheduler& scheduler) {
+int running_job_count(const std::vector<GPUNode::Snapshot>& snaps) {
     int total = 0;
-    for (const GPUNode& node : scheduler.nodes()) {
-        total += static_cast<int>(node.running_jobs().size());
+    for (const auto& snap : snaps) {
+        total += static_cast<int>(snap.running_jobs.size());
     }
     return total;
 }
 
-void print_state(int tick, const Scheduler& scheduler) {
-    std::cout << "==== tick " << tick << " ====\n";
-    for (const GPUNode& node : scheduler.nodes()) {
-        std::cout << "  " << node.node_id() << ": " << node.current_load() << "/"
-                  << node.gpu_capacity() << " GPUs | jobs: [";
+void print_state(int tick, const std::vector<GPUNode::Snapshot>& snaps,
+                 std::size_t pending) {
+    std::string out = "==== tick " + std::to_string(tick) + " ====\n";
+    for (const auto& snap : snaps) {
+        out += "  " + snap.node_id + ": " + std::to_string(snap.current_load) + "/" +
+               std::to_string(snap.gpu_capacity) + " GPUs | jobs: [";
         bool first = true;
-        for (const GPUNode::RunningJob& running : node.running_jobs()) {
-            std::cout << (first ? "" : ", ") << running.job.id << "("
-                      << running.remaining.count() << "s)";
+        for (const auto& running : snap.running_jobs) {
+            out += (first ? "" : ", ") + std::to_string(running.job.id) + "(" +
+                   std::to_string(running.remaining.count()) + "s)";
             first = false;
         }
-        std::cout << "]\n";
+        out += "]\n";
     }
-    std::cout << "  pending queue: " << scheduler.pending_jobs() << " job(s)\n\n";
+    out += "  pending queue: " + std::to_string(pending) + " job(s)";
+    sync_print(out);
 }
 
 }  // namespace
 
 int main() {
     Scheduler scheduler;
-    scheduler.add_node(GPUNode{"node-1", /*gpu_capacity=*/8});
-    scheduler.add_node(GPUNode{"node-2", /*gpu_capacity=*/4});
+    scheduler.add_node("node-1", /*gpu_capacity=*/8);
+    scheduler.add_node("node-2", /*gpu_capacity=*/4);
 
     // Jobs arrive over the first few ticks.
     std::vector<PendingSubmission> inbox = {
@@ -59,31 +63,29 @@ int main() {
         {5, Job{.id = 5, .required_gpus = 6, .duration = 6s}},
     };
 
-    constexpr int kMaxTicks = 30;
+    constexpr int kMaxTicks = 40;
     for (int tick = 1; tick <= kMaxTicks; ++tick) {
-        // 1. Advance time: complete finished jobs and free their GPUs.
-        for (std::uint64_t done : scheduler.advance(1s)) {
-            std::cout << "[tick " << tick << "] completed job " << done
-                      << " (GPUs freed)\n";
-        }
-
-        // 2. Submit any jobs that arrive on this tick.
+        // 1. Submit any jobs that arrive on this tick.
         for (const auto& entry : inbox) {
             if (entry.submit_at_tick == tick) {
                 scheduler.submit(entry.job);
-                std::cout << "[tick " << tick << "] submitted job " << entry.job.id
-                          << " (gpus=" << entry.job.required_gpus << ")\n";
+                sync_print("[tick " + std::to_string(tick) + "] submitted job " +
+                           std::to_string(entry.job.id) +
+                           " (gpus=" + std::to_string(entry.job.required_gpus) + ")");
             }
         }
 
-        // 3. Process scheduling.
+        // 2. Process scheduling (nodes free their own GPUs on their threads).
         std::size_t placed = scheduler.schedule_all();
         if (placed > 0) {
-            std::cout << "[tick " << tick << "] placed " << placed << " job(s)\n";
+            sync_print("[tick " + std::to_string(tick) + "] placed " +
+                       std::to_string(placed) + " job(s)");
         }
 
-        // 4. Print state.
-        print_state(tick, scheduler);
+        // 3. Print a consistent snapshot.
+        auto snaps = scheduler.snapshot();
+        std::size_t pending = scheduler.pending_jobs();
+        print_state(tick, snaps, pending);
 
         // Stop once nothing is left to submit, queued, or running.
         bool more_to_submit = false;
@@ -93,14 +95,14 @@ int main() {
                 break;
             }
         }
-        if (!more_to_submit && scheduler.pending_jobs() == 0 &&
-            running_job_count(scheduler) == 0) {
-            std::cout << "all jobs completed; stopping.\n";
+        if (!more_to_submit && pending == 0 && running_job_count(snaps) == 0) {
+            sync_print("all jobs completed; stopping.");
             break;
         }
 
         std::this_thread::sleep_for(1s);
     }
 
+    scheduler.stop_all();
     return 0;
 }
