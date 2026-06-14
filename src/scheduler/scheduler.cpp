@@ -12,6 +12,15 @@ void Scheduler::submit(const Job& job) {
     queue_.push(job);
 }
 
+std::vector<std::uint64_t> Scheduler::advance(std::chrono::seconds elapsed) {
+    std::vector<std::uint64_t> completed;
+    for (GPUNode& node : nodes_) {
+        std::vector<std::uint64_t> done = node.advance(elapsed);
+        completed.insert(completed.end(), done.begin(), done.end());
+    }
+    return completed;
+}
+
 bool Scheduler::schedule_next() {
     if (queue_.empty()) {
         return false;

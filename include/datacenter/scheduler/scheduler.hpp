@@ -1,6 +1,8 @@
 #pragma once
 
+#include <chrono>
 #include <cstddef>
+#include <cstdint>
 #include <queue>
 #include <vector>
 
@@ -18,6 +20,10 @@ public:
 
     // Enqueues a job for scheduling.
     void submit(const Job& job);
+
+    // Advances time across all nodes, completing finished jobs and freeing
+    // their GPUs. Returns the ids of the jobs that finished this step.
+    std::vector<std::uint64_t> advance(std::chrono::seconds elapsed);
 
     // Tries to place the oldest queued job on the first available node.
     // Returns true if a job was placed; false if the queue is empty or the
